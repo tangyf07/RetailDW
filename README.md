@@ -1,64 +1,45 @@
 # RetailDW
 
-Local PySpark retail data warehouse demo: **ODS → DWD → DWS → ADS**, with hard quality gates, refund-aware net GMV, dt-partition idempotent re-runs, and DWD/DWS/ADS GMV reconcile.
+本地 PySpark 零售数仓演示：**ODS → DWD → DWS → ADS**，硬质量门禁、退款净 GMV、按 dt 幂等重跑、跨层 GMV 对账。
 
-## Problem
+## Why
 
-Offline retail order data needs a reproducible layered warehouse that:
-
-- cleans and types source CSVs once (DWD),
-- aggregates user-day / category-day summaries (DWS),
-- publishes 7-day repurchase rate and net GMV KPIs (ADS),
-- fails closed on bad data, and proves GMV consistency across layers.
+离线订单 CSV 需要可复现的分层仓：清洗定型一次（DWD）、轻汇总（DWS）、发布 7 日复购与净 GMV（ADS），脏数据失败退出，并对 DWD≡DWS≡ADS 净 GMV 可证明一致。
 
 ## Architecture
 
 ```
-data/ods/*.csv          ODS  source CSVs (synthetic sample)
-        │  quality.py   hard gates — fail => exit 2, no DWD write
+data/ods/*.csv          ODS  源 CSV（合成样例）
+        │  quality.py   硬门禁 — 失败 exit 2，不写 DWD
         ▼
-warehouse/dwd/          DWD  facts/dims; is_paid; net_gmv = pay - refund
+warehouse/dwd/          DWD  事实/维表；is_paid；net_gmv = pay - refund
         ▼
-warehouse/dws/          DWS  user×day / category×day (net GMV)
+warehouse/dws/          DWS  user×day / category×day（净 GMV）
         ▼
-warehouse/ads/          ADS  repurchase_7d + kpi overview + reconcile report
+warehouse/ads/          ADS  repurchase_7d + KPI + gmv_reconcile_report
 ```
 
 | Layer | Role |
 | --- | --- |
-| ODS | Traceable source files |
-| DWD | Typed facts; `is_paid` for paid/shipped/completed only (`refunded` is not paid) |
-| DWS | Light aggregates used by KPIs |
-| ADS | 7-day repurchase + GMV; `gmv_reconcile_report.csv` |
+| ODS | 可追溯源文件 |
+| DWD | 定型事实；仅 paid/shipped/completed 为 `is_paid=1`（`refunded` 不算付费） |
+| DWS | KPI 用轻汇总（`order_cnt` / `paid_order_cnt`；`gross_qty`/`refund_qty`/`net_qty`） |
+| ADS | 7 日复购 + GMV；`gmv_reconcile_report.csv` |
 
-SQL lives in `sql/`; `jobs/pipeline.py` executes it. Optional `--dt YYYY-MM-DD` overwrites only that partition (`partitionOverwriteMode=dynamic`).
-
-**One run (Windows PowerShell):**
-
-```powershell
-.\scripts\run_local.ps1
-```
-
-**One verification result:** console shows `[quality] ODS gates passed`, ADS KPI overview, and `[reconcile] PASS`; report at `warehouse/ads/gmv_reconcile_report.csv` (DWD ≡ DWS ≡ ADS net GMV, tolerance 0.01).
-
-![reconcile PASS terminal](docs/evidence/reconcile-pass.png)
-
-![GMV reconcile report table](docs/evidence/gmv_reconcile_report.png)
+SQL 在 `sql/`；`jobs/pipeline.py` 执行。可选 `--dt YYYY-MM-DD`（`date.fromisoformat`）只覆盖该分区（`partitionOverwriteMode=dynamic`）。`dim_user` 每跑全量刷新（无 SCD2）。
 
 ## Guarantees
 
-1. **Quality gates** (before DWD): PK uniqueness/non-null, enums, non-negative amounts, FKs, parseable `order_ts`/`dt` with `DATE(order_ts)==dt`, line `amount == qty*unit_price` (0.01), order↔item amount and refund checks. Any violation → exit 2.
-2. **Refund semantics:** `net_gmv = pay_amount - refund_amount`. `status=refunded` ⇒ `is_paid=0` (does not enter repurchase numerator/denominator); refunds only reduce GMV. Item `net_qty = gross_qty - refund_qty`.
-3. **Idempotent dt re-run:** `--dt` parsed via `datetime.date.fromisoformat`; same `--dt` twice leaves that partition identical (format-agnostic fingerprint for parquet/CSV). ADS is rebuilt from all warehouse partitions after a scoped run.
-4. **Empty ODS partition:** `--dt` with 0 ODS orders **FAIL** (exit 2) by default; `--allow-empty-partition` overwrites `warehouse/.../dt=<dt>` with empty data identically on Linux parquet and Windows CSV.
-5. **GMV reconcile:** DWD paid net GMV ≡ DWS user-day GMV sum ≡ ADS day/total GMV (tolerance 0.01); FAIL → exit 2.
-6. **Metrics:** DWS splits `order_cnt` vs `paid_order_cnt`; category qty exposes `gross_qty` / `refund_qty` / `net_qty` (and `qty` = net).
-7. **dim_user:** full refresh every run (no SCD2).
-8. **Automated tests:** pytest covers quality (FK/amount), refund/repurchase, same-day multi-order, D+1/D+8 windows, incomplete window, idempotency, reconcile, and empty-partition fail/allow.
+1. **Quality（ODS→DWD）**：PK/非空、枚举、非负金额、FK；`order_ts`/`dt` 可解析且 `DATE(order_ts)==dt`；行 `amount==qty*unit_price`（容差 0.01）；订单↔明细金额与退款校验。任一失败 → exit 2。
+2. **Refund**：`net_gmv = pay_amount - refund_amount`；`status=refunded` ⇒ `is_paid=0`；明细 `net_qty = gross_qty - refund_qty`。
+3. **空分区**：`--dt` 下 ODS 0 单默认 **FAIL**（exit 2）；`--allow-empty-partition` 对 parquet/CSV 同等空覆盖 `warehouse/.../dt=<dt>`。
+4. **幂等 dt 重跑**：同 `--dt` 两次分区指纹一致（格式无关）；scoped 跑后 ADS 从全部仓分区重建。
+5. **GMV reconcile**：DWD 付费净 GMV ≡ DWS user-day 汇总 ≡ ADS（容差 0.01）；FAIL → exit 2。
+6. **Tests + CI**：pytest（质量/退款复购/窗口/幂等/对账/空分区）+ GitHub Actions（pytest → pipeline → reconcile PASS）。
 
 ## Quickstart
 
-**Requirements:** Python 3.9+, JDK 17+ (`java -version`), ~4GB RAM. On Windows, DWD/DWS persist as CSV partition parts (no winutils required).
+**Requirements:** Python 3.9+、JDK 17+（`java -version`）、约 4GB RAM。Windows 下 DWD/DWS 落 CSV 分区（无需 winutils）。
 
 ```bash
 git clone https://github.com/tangyf07/RetailDW.git
@@ -71,96 +52,60 @@ bash scripts/run_local.sh
 .\scripts\run_local.ps1
 ```
 
-Manual:
+成功标志：控制台 `[quality] ODS gates passed`、ADS KPI、`[reconcile] PASS`；报告 `warehouse/ads/gmv_reconcile_report.csv`。
 
-```bash
-python -m venv .venv
-# Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install pytest
-python jobs/pipeline.py
-```
-
-Partition re-run:
+分区重跑 / 空分区：
 
 ```bash
 DT=2026-07-13 bash scripts/run_local.sh
 # Windows: $env:DT='2026-07-13'; .\scripts\run_local.ps1
 python jobs/pipeline.py --dt 2026-07-13
-# Empty ODS for that dt fails unless:
-python jobs/pipeline.py --dt 2099-01-01 --allow-empty-partition
+python jobs/pipeline.py --dt 2099-01-01 --allow-empty-partition   # 否则空 ODS FAIL
 ```
-
-Tests:
 
 ```bash
 pytest
 # Windows: .\.venv\Scripts\python.exe -m pytest
 ```
 
-Success artifacts:
+样例：`data/ods/`（users 49 / orders 124 / order_items 189 含表头；`scripts/gen_sample_data.py` 固定种子）。
 
-- `warehouse/ads/ads_kpi_overview.csv`, `warehouse/ads/ads_repurchase_7d.csv`
-- `warehouse/ads/gmv_reconcile_report.csv`
-- `warehouse/dwd|dws/.../dt=YYYY-MM-DD/` partitions
-
-### Sample data
-
-| Table | Path | Rows (incl. header) |
-| --- | --- | --- |
-| users | `data/ods/users.csv` | 49 |
-| orders | `data/ods/orders.csv` | 124 |
-| order_items | `data/ods/order_items.csv` | 189 |
-
-Synthetic via `scripts/gen_sample_data.py` (fixed seed). Regenerate with `python scripts/gen_sample_data.py`.
-
-### Metric (7-day repurchase)
-
-```
-buyers(D)     = users with ≥1 paid order on day D (is_paid=1)
-repurchase(D) = buyers(D) with another paid order on a day in (D, D+7]
-rate(D)       = repurchase(D) / buyers(D)
-```
-
-Same calendar day does not count as repurchase. Incomplete windows (`D+7 > max_dt`) set `window_complete=0` and are excluded from the weighted overview rate. GMV uses net amounts.
+**7 日复购：** `buyers(D)` = 当日 ≥1 付费单用户；`repurchase(D)` = 在 `(D, D+7]` 另有付费日；同日不计；`D+7 > max_dt` → `window_complete=0`，不进加权总览。
 
 ## Evidence
-
-Local run evidence (paths redacted in screenshots where noted):
 
 | Evidence | File |
 | --- | --- |
 | Terminal reconcile PASS | [`docs/evidence/reconcile-pass.png`](docs/evidence/reconcile-pass.png) |
-| `gmv_reconcile_report` PASS table | [`docs/evidence/gmv_reconcile_report.png`](docs/evidence/gmv_reconcile_report.png) |
+| `gmv_reconcile_report` PASS | [`docs/evidence/gmv_reconcile_report.png`](docs/evidence/gmv_reconcile_report.png) |
 
-CI (GitHub Actions): `.github/workflows/ci.yml` runs `pytest`, then `python jobs/pipeline.py`, then asserts reconcile report is all PASS.
+![reconcile PASS terminal](docs/evidence/reconcile-pass.png)
+
+![GMV reconcile report table](docs/evidence/gmv_reconcile_report.png)
+
+CI：`.github/workflows/ci.yml` → `pytest` → `python jobs/pipeline.py` → 断言 reconcile 全 PASS。
+
+## Design decisions
+
+- **分层边界**：清洗与 `is_paid`/净 GMV 冻在 DWD；DWS 避免 ADS 反复扫明细；ADS 只表达产品口径（含窗口完整性）。
+- **无 Hive/Iceberg/Airflow**：本地文件 + Spark SQL + dt 动态覆盖即可演示；生产换存储与调度。
+- **dim_user 全量刷新**：样例无用户属性变更，不做 SCD2 zipper。
+- **业务日取自 `order_ts`**：样例无独立支付回调时间。
+- **门禁只挡 ODS→DWD**：脏行不进主题域；ADS 不静默丢行。
 
 ## Limitations
 
-- No Hive / Iceberg / Airflow — local files + Spark SQL only; production would use partitioned tables and a scheduler.
-- No SCD2 user dimension — `dwd/dim_user` is **full-refreshed every run** (slice replace, not slowly-changing history).
-- Order date from `order_ts`, not a separate payment-callback timestamp.
-- Quality gates sit between ODS and DWD only; ADS does not silently drop rows.
-- Sample is small by design (laptop-friendly); SQL shape matches larger daily volumes.
+- 非生产调度/湖表；无 K8s / 多租户 / 实时链路。
+- 样例体量小（笔记本可跑）；规模瓶颈在分区/倾斜/小文件，不在 SQL 形状。
+- 软质量（同秒重复单、城市枚举外值等）本演示不阻断，生产宜进质量报告。
 
-## Layout
+## Docs
 
-```
-data/ods/                 offline sample CSV
-docs/evidence/            reconcile PASS screenshots
-docs/interview-notes.md   optional talking points (kept out of README)
-jobs/pipeline.py          entry (--dt supported)
-jobs/quality.py           quality gates
-jobs/reconcile_gmv.py     DWD/DWS/ADS GMV reconcile
-sql/                      DWD / DWS / ADS Spark SQL
-scripts/run_local.ps1     Windows runner
-scripts/run_local.sh      Linux/macOS runner
-tests/                    pytest + small fixtures
-.github/workflows/ci.yml  pytest → pipeline → reconcile
-LICENSE                   MIT
-warehouse/                run output (gitignored)
-```
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+| Doc | Path |
+| --- | --- |
+| Interview talking points（已移出 README） | [`docs/interview-notes.md`](docs/interview-notes.md) |
+| Reconcile screenshots | [`docs/evidence/`](docs/evidence/) |
+| Pipeline / quality / reconcile | `jobs/pipeline.py`, `jobs/quality.py`, `jobs/reconcile_gmv.py` |
+| Spark SQL | `sql/dwd.sql`, `sql/dws.sql`, `sql/ads.sql` |
+| Tests | `tests/` |
+| License | [LICENSE](LICENSE) (MIT) |
