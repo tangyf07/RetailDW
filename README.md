@@ -1,4 +1,4 @@
-# spark-retail-dw
+# RetailDW
 
 秋招数据开发 Demo：用 **PySpark local** 把一份离线合成零售订单跑通 **ODS → DWD → DWS → ADS**，质量门失败即停，核心指标是 **7 日复购率**（附 GMV）。
 
@@ -23,7 +23,7 @@
 
 ```bash
 git clone https://github.com/tangyf07/RetailDW.git
-cd spark-retail-dw
+cd RetailDW
 
 # Linux / macOS
 bash scripts/run_local.sh
