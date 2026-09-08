@@ -1,38 +1,61 @@
 # RetailDW
 
-秋招数据开发 Demo：用 **PySpark local** 把一份离线合成零售订单跑通 **ODS → DWD → DWS → ADS**，质量门失败即停，核心指标是 **7 日复购率**（附 GMV）。
+Local PySpark retail data warehouse demo: **ODS → DWD → DWS → ADS**, with hard quality gates, refund-aware net GMV, dt-partition idempotent re-runs, and DWD/DWS/ADS GMV reconcile.
 
-克隆后按下面命令跑，几分钟内应打印 `ads_kpi_overview` 并写出 `warehouse/ads/*.csv`。
+## Problem
 
-## 30 秒怎么讲
+Offline retail order data needs a reproducible layered warehouse that:
 
-- 数据：合成电商订单（48 用户 / 123 单 / 188 明细，2026-07-01～2026-08-15），仓库内 CSV，可离线。
-- 分层：贴源 ODS → 清洗事实/维度 DWD → 用户日/类目日轻度汇总 DWS → 指标 ADS。
-- 质量：主键、非空、枚举、外键、订单金额=明细合计，任一失败 exit 2。
-- 指标：观察日 D 有已支付订单的用户中，在 (D, D+7] 再次支付的比例；不完整窗口单独标记。
+- cleans and types source CSVs once (DWD),
+- aggregates user-day / category-day summaries (DWS),
+- publishes 7-day repurchase rate and net GMV KPIs (ADS),
+- fails closed on bad data, and proves GMV consistency across layers.
 
-## 环境
+## Architecture
 
-- Python 3.9+
-- JDK 17+（`java -version` 能跑；PySpark 需要）
-- Windows：Spark 写 parquet 需要 Hadoop winutils + native IO。本 Demo 在 Windows 上把 DWD/DWS 落成 CSV part 文件，ADS KPI 始终用 Python 写出，clone 即可跑通。
-- 内存 4GB 足够（local 小样本）
-- 首次 `pip install pyspark` 会下载 Spark（约 400MB），之后跑 pipeline 约 1–2 分钟
+```
+data/ods/*.csv          ODS  source CSVs (synthetic sample)
+        │  quality.py   hard gates — fail => exit 2, no DWD write
+        ▼
+warehouse/dwd/          DWD  facts/dims; is_paid; net_gmv = pay - refund
+        ▼
+warehouse/dws/          DWS  user×day / category×day (net GMV)
+        ▼
+warehouse/ads/          ADS  repurchase_7d + kpi overview + reconcile report
+```
 
+| Layer | Role |
+| --- | --- |
+| ODS | Traceable source files |
+| DWD | Typed facts; `is_paid` for paid/shipped/completed only (`refunded` is not paid) |
+| DWS | Light aggregates used by KPIs |
+| ADS | 7-day repurchase + GMV; `gmv_reconcile_report.csv` |
 
-## 证据图
+SQL lives in `sql/`; `jobs/pipeline.py` executes it. Optional `--dt YYYY-MM-DD` overwrites only that partition (`partitionOverwriteMode=dynamic`).
 
-本机 `run_local` 验收证据（截图允许本机路径；仓库正文不写死本机路径）：
+**One run (Windows PowerShell):**
 
-1. `gmv_reconcile_report` 跨层对账表（全 PASS）
+```powershell
+.\scripts\run_local.ps1
+```
 
-![gmv_reconcile_report](docs/evidence/gmv_reconcile_report.png)
+**One verification result:** console shows `[quality] ODS gates passed`, ADS KPI overview, and `[reconcile] PASS`; report at `warehouse/ads/gmv_reconcile_report.csv` (DWD ≡ DWS ≡ ADS net GMV, tolerance 0.01).
 
-2. 终端摘要：`ads_kpi_overview` + `[reconcile] PASS`（截图可含本机路径；源码/文档正文不含写死路径）
+![reconcile PASS terminal](docs/evidence/reconcile-pass.png)
 
-![reconcile PASS](docs/evidence/reconcile-pass.png)
+![GMV reconcile report table](docs/evidence/gmv_reconcile_report.png)
 
-## 怎么跑
+## Guarantees
+
+1. **Quality gates** (before DWD): PK uniqueness/non-null, enums, non-negative amounts, FKs, order↔item amount and refund checks. Any violation → exit 2.
+2. **Refund semantics:** `net_gmv = pay_amount - refund_amount`. `status=refunded` ⇒ `is_paid=0` (does not enter repurchase numerator/denominator); refunds only reduce GMV.
+3. **Idempotent dt re-run:** same `--dt` twice leaves that partition identical; ADS is rebuilt from all warehouse partitions after a scoped run.
+4. **GMV reconcile:** DWD paid net GMV ≡ DWS user-day GMV sum ≡ ADS day/total GMV (tolerance 0.01); FAIL → exit 2.
+5. **Automated tests:** `pytest` covers refund/repurchase, net GMV, idempotency, reconcile PASS, and bad-fixture non-zero exit.
+
+## Quickstart
+
+**Requirements:** Python 3.9+, JDK 17+ (`java -version`), ~4GB RAM. On Windows, DWD/DWS persist as CSV partition parts (no winutils required).
 
 ```bash
 git clone https://github.com/tangyf07/RetailDW.git
@@ -45,123 +68,93 @@ bash scripts/run_local.sh
 .\scripts\run_local.ps1
 ```
 
-或手动：
+Manual:
 
 ```bash
 python -m venv .venv
-# Linux/macOS: source .venv/bin/activate
 # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install pytest
 python jobs/pipeline.py
 ```
 
-可选按日重跑（分区覆盖，同一 `dt` 跑两次结果一致）：
+Partition re-run:
 
 ```bash
 DT=2026-07-13 bash scripts/run_local.sh
 # Windows: $env:DT='2026-07-13'; .\scripts\run_local.ps1
 ```
 
-成功时看：
+Tests:
 
-- 控制台：`[quality] ODS gates passed`，然后 `ADS kpi overview`，以及 `[reconcile] PASS`
-- 文件：`warehouse/ads/ads_kpi_overview.csv`、`warehouse/ads/ads_repurchase_7d.csv`
-- 对账：`warehouse/ads/gmv_reconcile_report.csv`（DWD 订单净 GMV ≡ DWS 用户日 GMV 合计 ≡ ADS 日/总 GMV，容差 0.01；FAIL 时 pipeline exit 2）
-
-`warehouse/dwd|dws/.../dt=YYYY-MM-DD/` 为按日分区；`--dt` 时只覆盖该分区（`partitionOverwriteMode=dynamic`），ADS 会从仓库全部分区重算以保持总览一致。
-
-## 数据从哪来、多大规模
-
-| 表 | 路径 | 行数（含表头） | 粒度 |
-| --- | --- | --- | --- |
-| 用户 | `data/ods/users.csv` | 49 | 用户 |
-| 订单 | `data/ods/orders.csv` | 124 | 一单一行 |
-| 明细 | `data/ods/order_items.csv` | 189 | 一行一个 SKU |
-
-- **来源**：`scripts/gen_sample_data.py` 用固定种子生成的合成数据（城市含哈尔滨及北上深杭成），**不是**业务库导出，也不是课程 IoT 数据。
-- **为什么合成**：面试可复现、无隐私、口径可控；样本刻意做了「7 日内复购 / 7 日外再购 / 只买一次 / 取消单」几种人，方便讲清楚指标。
-- 需要重生成：`python scripts/gen_sample_data.py`（会覆盖 `data/ods/`）。
-
-## 分层为什么这样切
-
-```
-data/ods/*.csv          ODS  原样接入，字段名与文件一致
-        │  quality.py   硬门槛，不过不写下游
-        ▼
-warehouse/dwd/          DWD  类型、支付标记 is_paid、维表
-        ▼
-warehouse/dws/          DWS  user×day、category×day，避免 ADS 重复扫明细
-        ▼
-warehouse/ads/          ADS  复购率 + KPI 总览（CSV 给面试官直接打开）
+```bash
+pytest
+# Windows: .\.venv\Scripts\python.exe -m pytest
 ```
 
-| 层 | 职责 | 为什么独立 |
+Success artifacts:
+
+- `warehouse/ads/ads_kpi_overview.csv`, `warehouse/ads/ads_repurchase_7d.csv`
+- `warehouse/ads/gmv_reconcile_report.csv`
+- `warehouse/dwd|dws/.../dt=YYYY-MM-DD/` partitions
+
+### Sample data
+
+| Table | Path | Rows (incl. header) |
 | --- | --- | --- |
-| ODS | 贴源、可追溯 | 出了问题能对回文件，不把清洗写死在源头 |
-| DWD | 清洗 + 统一粒度 | 事实表一单一行、明细一行一件；`is_paid` 在这层定死，下游口径一致 |
-| DWS | 轻度汇总 | 复购、GMV、类目排行都吃 user-day / category-day，不必每次 join 明细 |
-| ADS | 面向应用的指标 | 面试/看板只看这一张；窗口是否完整是产品口径，不属于 DWD |
+| users | `data/ods/users.csv` | 49 |
+| orders | `data/ods/orders.csv` | 124 |
+| order_items | `data/ods/order_items.csv` | 189 |
 
-SQL 在 `sql/dwd.sql`、`sql/dws.sql`、`sql/ads.sql`，`jobs/pipeline.py` 按文件执行，方便对着 SQL 讲，而不是翻 Python。
+Synthetic via `scripts/gen_sample_data.py` (fixed seed). Regenerate with `python scripts/gen_sample_data.py`.
 
-## 质量门怎么工作
-
-`jobs/quality.py` 在 **写 DWD 之前** 跑，全部是硬规则（失败即停）：
-
-1. 主键非空且唯一：`user_id` / `order_id` / `order_item_id`
-2. 必填字段非空
-3. 枚举：`gender`、`channel`、`status`
-4. 范围：`pay_amount/unit_price/amount >= 0`，`qty > 0`
-5. 外键：订单用户必须在用户表；明细订单必须在订单表
-6. 金额勾稽：已支付/已退款订单 `pay_amount` 必须等于明细 `amount` 之和（误差 0.01）；`refund_amount` 与明细退款合计一致，且 `refunded` 须全额退
-
-演示失败：把 `data/ods/orders.csv` 某行 `pay_amount` 改成负数再跑，应看到 `QUALITY FAIL` 且不写 ADS。
-
-软规则（本 Demo 没做成阻断）：同一用户同一秒重复单、城市维值未在枚举里——面试可以补一句「生产会入质量报表而不是杀任务」。
-
-## 核心指标口径
-
-**7 日复购率（按观察日 D）**
+### Metric (7-day repurchase)
 
 ```
-buyers(D)      = 当天有 ≥1 笔已支付订单的用户
-repurchase(D)  = buyers(D) 中，在 D+1～D+7 任意一天再次有已支付订单的用户
-rate(D)        = repurchase(D) / buyers(D)
+buyers(D)     = users with ≥1 paid order on day D (is_paid=1)
+repurchase(D) = buyers(D) with another paid order on a day in (D, D+7]
+rate(D)       = repurchase(D) / buyers(D)
 ```
 
-- **已支付**：`status ∈ {paid, shipped, completed}`；`unpaid/cancelled/refunded` 的 `is_paid=0`，不进复购分母/分子。
-- **冲销/退货**：订单可带 `refund_amount`；明细可带 `refund_qty`/`refund_amount`（均 ≥0）。`pay_amount` 保留原支付额；DWD 增加 `net_gmv = pay_amount - refund_amount`（明细 `net_amount = amount - refund_amount`）。全日/总 GMV 用净额。`status=refunded` 为全额退（`refund_amount == pay_amount`），只减 GMV，不产生复购事件。
-- **同一天多单不算复购**（间隔必须跨日）。这是常见零售口径，避免「拆单」抬高复购。
-- **不完整窗口**：样本最大日为 `max_dt`，若 `D+7 > max_dt` 则 `window_complete=0`。总览 KPI 只用完整窗口做加权：`sum(repurchase_users) / sum(buyers)`。
-- **GMV**：已支付订单净额 `net_gmv` 之和（与明细净额勾稽；对账见运行产物）。
+Same calendar day does not count as repurchase. Incomplete windows (`D+7 > max_dt`) set `window_complete=0` and are excluded from the weighted overview rate. GMV uses net amounts.
 
-总览字段见 `warehouse/ads/ads_kpi_overview.csv`：`paid_orders`、`paid_users`、`gmv_total`、`repurchase_rate_7d_weighted`。
+## Evidence
 
-## 做了哪些取舍（面试追问）
+Local run evidence (paths redacted in screenshots where noted):
 
-- 不用 Hive/Iceberg：local 文件 + parquet 足够演示分层和幂等 `overwrite`；生产会换成分区表 + 任务调度。
-- 不用维度拉链：样本无用户属性变更，用户维是切片。
-- 复购看「订单日」不看「支付回调日」：样本只有 `order_ts`。
-- 质量放 ODS→DWD 之间：脏数据不允许进主题层；ADS 不再做一次静默 drop。
-- 样本故意偏小：保证笔记本几分钟跑完；逻辑与日千万级订单相同，瓶颈会变成分区、倾斜和文件大小，而不是 SQL。
+| Evidence | File |
+| --- | --- |
+| Terminal reconcile PASS | [`docs/evidence/reconcile-pass.png`](docs/evidence/reconcile-pass.png) |
+| `gmv_reconcile_report` PASS table | [`docs/evidence/gmv_reconcile_report.png`](docs/evidence/gmv_reconcile_report.png) |
 
-## 目录
+CI (GitHub Actions): `.github/workflows/ci.yml` runs `pytest`, then `python jobs/pipeline.py`, then asserts reconcile report is all PASS.
+
+## Limitations
+
+- No Hive / Iceberg / Airflow — local files + Spark SQL only; production would use partitioned tables and a scheduler.
+- No SCD2 user dimension — sample has no attribute history.
+- Order date from `order_ts`, not a separate payment-callback timestamp.
+- Quality gates sit between ODS and DWD only; ADS does not silently drop rows.
+- Sample is small by design (laptop-friendly); SQL shape matches larger daily volumes.
+
+## Layout
 
 ```
-data/ods/                 离线样本 CSV
-jobs/pipeline.py          入口（支持 --dt）
-jobs/quality.py           质量门
-jobs/reconcile_gmv.py     DWD/DWS/ADS GMV 对账
+data/ods/                 offline sample CSV
+docs/evidence/            reconcile PASS screenshots
+docs/interview-notes.md   optional talking points (kept out of README)
+jobs/pipeline.py          entry (--dt supported)
+jobs/quality.py           quality gates
+jobs/reconcile_gmv.py     DWD/DWS/ADS GMV reconcile
 sql/                      DWD / DWS / ADS Spark SQL
-scripts/run_local.sh      Linux/macOS（透传 DT/--dt）
-scripts/run_local.ps1     Windows
-scripts/gen_sample_data.py
-warehouse/                运行产出（git 忽略；含 dt 分区与对账报告）
+scripts/run_local.ps1     Windows runner
+scripts/run_local.sh      Linux/macOS runner
+tests/                    pytest + small fixtures
+.github/workflows/ci.yml  pytest → pipeline → reconcile
+LICENSE                   MIT
+warehouse/                run output (gitignored)
 ```
 
-## 面试 2 分钟讲法
+## License
 
-1. 「这是一个可跑的四层数仓，不是空架构图。数据在仓库里，clone 就能出 7 日复购率。」
-2. 「ODS 只负责接入；质量门卡主键、外键和订单-明细金额；DWD 固化 is_paid；DWS 出用户日，避免 ADS 重复扫明细。」
-3. 「复购率分母是当天支付用户，分子是 7 日内再次支付；同一天不算；最后 7 天窗口不完整所以不算进总 KPI。」
-4. 打开 `ads_kpi_overview.csv` 指一行加权复购率和 GMV。
+MIT — see [LICENSE](LICENSE).
