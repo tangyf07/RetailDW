@@ -22,7 +22,13 @@
 
 ## 证据图
 
-本机 `run_local`：`ads_kpi_overview` + `[reconcile] PASS`（路径已脱敏）。
+本机 `run_local` 验收证据（公开仓不含本机绝对路径）：
+
+1. `gmv_reconcile_report` 跨层对账表（全 PASS）
+
+![gmv_reconcile_report](docs/evidence/gmv_reconcile_report.png)
+
+2. 终端摘要：`ads_kpi_overview` + `[reconcile] PASS`（路径已脱敏）
 
 ![reconcile PASS](docs/evidence/reconcile-pass.png)
 
