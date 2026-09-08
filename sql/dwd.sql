@@ -15,6 +15,8 @@ SELECT
   to_timestamp(order_ts) AS order_ts,
   status,
   CAST(pay_amount AS DOUBLE) AS pay_amount,
+  CAST(refund_amount AS DOUBLE) AS refund_amount,
+  ROUND(CAST(pay_amount AS DOUBLE) - CAST(refund_amount AS DOUBLE), 2) AS net_gmv,
   NULLIF(pay_channel, '') AS pay_channel,
   to_date(dt) AS dt,
   CASE WHEN status IN ('paid', 'shipped', 'completed') THEN 1 ELSE 0 END AS is_paid
@@ -32,6 +34,9 @@ SELECT
   CAST(i.qty AS INT) AS qty,
   CAST(i.unit_price AS DOUBLE) AS unit_price,
   CAST(i.amount AS DOUBLE) AS amount,
+  CAST(i.refund_qty AS INT) AS refund_qty,
+  CAST(i.refund_amount AS DOUBLE) AS refund_amount,
+  ROUND(CAST(i.amount AS DOUBLE) - CAST(i.refund_amount AS DOUBLE), 2) AS net_amount,
   o.is_paid
 FROM ods_order_items i
 JOIN dwd_fact_order o ON i.order_id = o.order_id;

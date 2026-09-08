@@ -11,4 +11,17 @@ $Python = if ($env:PYTHON) { $env:PYTHON } else { "python" }
 & $Python -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -U pip
 & .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-& .\.venv\Scripts\python.exe jobs\pipeline.py
+
+$dtArgs = @()
+if ($env:DT) {
+    $dtArgs = @("--dt", $env:DT)
+} elseif ($args.Count -ge 2 -and $args[0] -eq "--dt") {
+    $dtArgs = @("--dt", $args[1])
+} elseif ($args.Count -ge 1 -and $args[0] -match '^\d{4}-\d{2}-\d{2}$') {
+    $dtArgs = @("--dt", $args[0])
+}
+
+# PySpark prints JVM warnings to stderr; do not treat as terminating errors.
+$ErrorActionPreference = "Continue"
+& .\.venv\Scripts\python.exe jobs\pipeline.py @dtArgs
+exit $LASTEXITCODE

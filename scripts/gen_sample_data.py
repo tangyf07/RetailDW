@@ -30,6 +30,7 @@ SKUS = [
     ("SKU10", "口红", "美妆", 99.00),
 ]
 
+
 def main() -> None:
     rng = random.Random(SEED)
     out = Path(__file__).resolve().parents[1] / "data" / "ods"
@@ -48,7 +49,6 @@ def main() -> None:
                 "channel": rng.choice(CHANNELS),
             }
         )
-        # persona: 0 loyal, 1 occasional, 2 one-shot
         users[-1]["_persona"] = 0 if i <= 14 else (1 if i <= 30 else 2)
 
     orders = []
@@ -60,18 +60,16 @@ def main() -> None:
     occasional = [u for u in users if u["_persona"] == 1]
     oneshot = [u for u in users if u["_persona"] == 2]
 
-    # Loyal: 3-5 paid orders, many within 7 days
     for u in loyal:
         n = rng.randint(3, 5)
         t = START + timedelta(days=rng.randint(0, 12))
         for k in range(n):
             if k > 0:
-                t = t + timedelta(days=rng.randint(2, 6))  # within 7d
+                t = t + timedelta(days=rng.randint(2, 6))
             if t > END:
                 break
             oid, iid = add_order(rng, u, t, oid, iid, orders, items, paid=True)
 
-    # Occasional: 2-3 orders, gaps often > 7d
     for u in occasional:
         n = rng.randint(2, 3)
         t = START + timedelta(days=rng.randint(0, 20))
@@ -82,17 +80,16 @@ def main() -> None:
                 break
             oid, iid = add_order(rng, u, t, oid, iid, orders, items, paid=True)
 
-    # One-shot: exactly 1 paid order
     for u in oneshot:
         t = START + timedelta(days=rng.randint(0, 40))
         oid, iid = add_order(rng, u, t, oid, iid, orders, items, paid=True)
 
-    # A handful of cancelled / unpaid noise (~8%)
     noise_users = rng.sample(users, 10)
     for u in noise_users:
         t = START + timedelta(days=rng.randint(0, 40))
-        paid = False
-        oid, iid = add_order(rng, u, t, oid, iid, orders, items, paid=paid)
+        oid, iid = add_order(rng, u, t, oid, iid, orders, items, paid=False)
+
+    apply_refunds(rng, orders, items)
 
     write_csv(
         out / "users.csv",
@@ -101,15 +98,44 @@ def main() -> None:
     )
     write_csv(
         out / "orders.csv",
-        ["order_id", "user_id", "order_ts", "status", "pay_amount", "pay_channel", "dt"],
+        [
+            "order_id",
+            "user_id",
+            "order_ts",
+            "status",
+            "pay_amount",
+            "refund_amount",
+            "pay_channel",
+            "dt",
+        ],
         orders,
     )
     write_csv(
         out / "order_items.csv",
-        ["order_item_id", "order_id", "sku_id", "sku_name", "category", "qty", "unit_price", "amount"],
+        [
+            "order_item_id",
+            "order_id",
+            "sku_id",
+            "sku_name",
+            "category",
+            "qty",
+            "unit_price",
+            "amount",
+            "refund_qty",
+            "refund_amount",
+        ],
         items,
     )
-    print(f"users={len(users)} orders={len(orders)} items={len(items)} -> {out}")
+    n_refunded = sum(1 for o in orders if o["status"] == "refunded")
+    n_partial = sum(
+        1
+        for o in orders
+        if o["status"] in STATUSES_PAID and float(o["refund_amount"]) > 0
+    )
+    print(
+        f"users={len(users)} orders={len(orders)} items={len(items)} "
+        f"refunded={n_refunded} partial_refund={n_partial} -> {out}"
+    )
 
 
 def add_order(rng, user, d, oid, iid, orders, items, paid: bool):
@@ -134,6 +160,8 @@ def add_order(rng, user, d, oid, iid, orders, items, paid: bool):
                 "qty": qty,
                 "unit_price": f"{price:.2f}",
                 "amount": f"{amount:.2f}",
+                "refund_qty": 0,
+                "refund_amount": "0.00",
             }
         )
         iid += 1
@@ -145,9 +173,7 @@ def add_order(rng, user, d, oid, iid, orders, items, paid: bool):
     else:
         status = rng.choice(STATUSES_OTHER)
         pay_channel = "" if status == "unpaid" else rng.choice(PAY_CHANNELS)
-        pay_amount = "0.00" if status in ("unpaid", "cancelled") else f"{total:.2f}"
-        if status == "cancelled":
-            pay_amount = "0.00"
+        pay_amount = "0.00"
     orders.append(
         {
             "order_id": order_id,
@@ -155,11 +181,64 @@ def add_order(rng, user, d, oid, iid, orders, items, paid: bool):
             "order_ts": ts.strftime("%Y-%m-%d %H:%M:%S"),
             "status": status,
             "pay_amount": pay_amount,
+            "refund_amount": "0.00",
             "pay_channel": pay_channel,
             "dt": d.isoformat(),
         }
     )
     return oid + 1, iid
+
+
+def apply_refunds(rng, orders, items) -> None:
+    """Inject full refunds (status=refunded) and partial refunds on paid orders."""
+    by_oid = {o["order_id"]: o for o in orders}
+    items_by_oid: dict[str, list] = {}
+    for it in items:
+        items_by_oid.setdefault(it["order_id"], []).append(it)
+
+    paid_oids = [
+        o["order_id"]
+        for o in orders
+        if o["status"] in STATUSES_PAID and float(o["pay_amount"]) > 0
+    ]
+    rng.shuffle(paid_oids)
+
+    # Full refunds: status -> refunded; is_paid will be 0; net_gmv = 0
+    full_n = min(6, max(1, len(paid_oids) // 12))
+    full_oids = set(paid_oids[:full_n])
+    for oid in full_oids:
+        o = by_oid[oid]
+        o["status"] = "refunded"
+        pay = float(o["pay_amount"])
+        o["refund_amount"] = f"{pay:.2f}"
+        for it in items_by_oid[oid]:
+            it["refund_qty"] = int(it["qty"])
+            it["refund_amount"] = it["amount"]
+
+    # Partial refunds: keep paid/shipped/completed; reduce net GMV
+    remain = [oid for oid in paid_oids if oid not in full_oids]
+    partial_n = min(8, max(1, len(remain) // 10))
+    for oid in remain[:partial_n]:
+        o = by_oid[oid]
+        its = items_by_oid[oid]
+        target = its[0]
+        qty = int(target["qty"])
+        unit = float(target["unit_price"])
+        # refund at least one unit when possible, else partial amount
+        if qty >= 1:
+            rq = 1 if qty == 1 else rng.choice([1] + ([1, 2] if qty >= 2 else [1]))
+            rq = min(rq, qty)
+            ra = round(rq * unit, 2)
+        else:
+            rq = 0
+            ra = round(float(target["amount"]) * 0.5, 2)
+        # ensure refund < amount for partial (if single-item full would equal pay)
+        if ra >= float(o["pay_amount"]) and len(its) == 1 and qty == 1:
+            ra = round(float(target["amount"]) * 0.5, 2)
+            rq = 0
+        target["refund_qty"] = rq
+        target["refund_amount"] = f"{ra:.2f}"
+        o["refund_amount"] = f"{ra:.2f}"
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
