@@ -47,11 +47,14 @@ SQL lives in `sql/`; `jobs/pipeline.py` executes it. Optional `--dt YYYY-MM-DD` 
 
 ## Guarantees
 
-1. **Quality gates** (before DWD): PK uniqueness/non-null, enums, non-negative amounts, FKs, order↔item amount and refund checks. Any violation → exit 2.
-2. **Refund semantics:** `net_gmv = pay_amount - refund_amount`. `status=refunded` ⇒ `is_paid=0` (does not enter repurchase numerator/denominator); refunds only reduce GMV.
-3. **Idempotent dt re-run:** same `--dt` twice leaves that partition identical; ADS is rebuilt from all warehouse partitions after a scoped run.
-4. **GMV reconcile:** DWD paid net GMV ≡ DWS user-day GMV sum ≡ ADS day/total GMV (tolerance 0.01); FAIL → exit 2.
-5. **Automated tests:** `pytest` covers refund/repurchase, net GMV, idempotency, reconcile PASS, and bad-fixture non-zero exit.
+1. **Quality gates** (before DWD): PK uniqueness/non-null, enums, non-negative amounts, FKs, parseable `order_ts`/`dt` with `DATE(order_ts)==dt`, line `amount == qty*unit_price` (0.01), order↔item amount and refund checks. Any violation → exit 2.
+2. **Refund semantics:** `net_gmv = pay_amount - refund_amount`. `status=refunded` ⇒ `is_paid=0` (does not enter repurchase numerator/denominator); refunds only reduce GMV. Item `net_qty = gross_qty - refund_qty`.
+3. **Idempotent dt re-run:** `--dt` parsed via `datetime.date.fromisoformat`; same `--dt` twice leaves that partition identical (format-agnostic fingerprint for parquet/CSV). ADS is rebuilt from all warehouse partitions after a scoped run.
+4. **Empty ODS partition:** `--dt` with 0 ODS orders **FAIL** (exit 2) by default; `--allow-empty-partition` overwrites `warehouse/.../dt=<dt>` with empty data identically on Linux parquet and Windows CSV.
+5. **GMV reconcile:** DWD paid net GMV ≡ DWS user-day GMV sum ≡ ADS day/total GMV (tolerance 0.01); FAIL → exit 2.
+6. **Metrics:** DWS splits `order_cnt` vs `paid_order_cnt`; category qty exposes `gross_qty` / `refund_qty` / `net_qty` (and `qty` = net).
+7. **dim_user:** full refresh every run (no SCD2).
+8. **Automated tests:** pytest covers quality (FK/amount), refund/repurchase, same-day multi-order, D+1/D+8 windows, incomplete window, idempotency, reconcile, and empty-partition fail/allow.
 
 ## Quickstart
 
@@ -83,6 +86,9 @@ Partition re-run:
 ```bash
 DT=2026-07-13 bash scripts/run_local.sh
 # Windows: $env:DT='2026-07-13'; .\scripts\run_local.ps1
+python jobs/pipeline.py --dt 2026-07-13
+# Empty ODS for that dt fails unless:
+python jobs/pipeline.py --dt 2099-01-01 --allow-empty-partition
 ```
 
 Tests:
@@ -132,7 +138,7 @@ CI (GitHub Actions): `.github/workflows/ci.yml` runs `pytest`, then `python jobs
 ## Limitations
 
 - No Hive / Iceberg / Airflow — local files + Spark SQL only; production would use partitioned tables and a scheduler.
-- No SCD2 user dimension — sample has no attribute history.
+- No SCD2 user dimension — `dwd/dim_user` is **full-refreshed every run** (slice replace, not slowly-changing history).
 - Order date from `order_ts`, not a separate payment-callback timestamp.
 - Quality gates sit between ODS and DWD only; ADS does not silently drop rows.
 - Sample is small by design (laptop-friendly); SQL shape matches larger daily volumes.

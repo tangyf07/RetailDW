@@ -44,12 +44,12 @@ CREATE OR REPLACE TEMP VIEW ads_kpi_overview AS
 SELECT
   (SELECT COUNT(*) FROM dwd_fact_order WHERE is_paid = 1) AS paid_orders,
   (SELECT COUNT(DISTINCT user_id) FROM dwd_fact_order WHERE is_paid = 1) AS paid_users,
-  (SELECT ROUND(SUM(gmv), 2) FROM dws_user_order_1d) AS gmv_total,
-  SUM(CASE WHEN window_complete = 1 THEN buyers ELSE 0 END) AS buyers_complete_window,
-  SUM(CASE WHEN window_complete = 1 THEN repurchase_users ELSE 0 END) AS repurchase_users_complete_window,
+  (SELECT ROUND(COALESCE(SUM(gmv), 0), 2) FROM dws_user_order_1d) AS gmv_total,
+  COALESCE(SUM(CASE WHEN window_complete = 1 THEN buyers ELSE 0 END), 0) AS buyers_complete_window,
+  COALESCE(SUM(CASE WHEN window_complete = 1 THEN repurchase_users ELSE 0 END), 0) AS repurchase_users_complete_window,
   ROUND(
-    SUM(CASE WHEN window_complete = 1 THEN repurchase_users ELSE 0 END)
-    / SUM(CASE WHEN window_complete = 1 THEN buyers ELSE 0 END),
+    COALESCE(SUM(CASE WHEN window_complete = 1 THEN repurchase_users ELSE 0 END), 0)
+    / NULLIF(SUM(CASE WHEN window_complete = 1 THEN buyers ELSE 0 END), 0),
     4
   ) AS repurchase_rate_7d_weighted
 FROM ads_repurchase_7d;

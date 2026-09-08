@@ -1,0 +1,2 @@
+order_id,user_id,order_ts,status,pay_amount,refund_amount,pay_channel,dt
+O1,U1,2026-07-01 10:00:00,paid,100.00,0.00,alipay,2026-07-01

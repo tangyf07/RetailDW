@@ -1,4 +1,5 @@
 -- DWD: typed, cleaned fact/dim. One grain per table. No business aggregation.
+-- dim_user is full-refreshed each pipeline run (no SCD2).
 CREATE OR REPLACE TEMP VIEW dwd_dim_user AS
 SELECT
   user_id,
@@ -32,10 +33,12 @@ SELECT
   i.sku_name,
   i.category,
   CAST(i.qty AS INT) AS qty,
+  CAST(i.qty AS INT) AS gross_qty,
   CAST(i.unit_price AS DOUBLE) AS unit_price,
   CAST(i.amount AS DOUBLE) AS amount,
   CAST(i.refund_qty AS INT) AS refund_qty,
   CAST(i.refund_amount AS DOUBLE) AS refund_amount,
+  CAST(i.qty AS INT) - CAST(i.refund_qty AS INT) AS net_qty,
   ROUND(CAST(i.amount AS DOUBLE) - CAST(i.refund_amount AS DOUBLE), 2) AS net_amount,
   o.is_paid
 FROM ods_order_items i

@@ -72,6 +72,34 @@ def assert_amount_match(orders: DataFrame, items: DataFrame, name: str) -> None:
         _fail(name, n, "pay_amount != sum(order_items.amount)")
 
 
+def assert_item_amount_eq_qty_price(items: DataFrame, name: str) -> None:
+    """Each line: amount == qty * unit_price within 0.01."""
+    bad = items.filter(
+        F.col("amount").isNull()
+        | F.col("qty").isNull()
+        | F.col("unit_price").isNull()
+        | (F.abs(F.col("amount") - F.col("qty") * F.col("unit_price")) > 0.01)
+    )
+    n = bad.count()
+    if n:
+        _fail(name, n, "amount != qty * unit_price")
+
+
+def assert_order_ts_dt_parseable_and_aligned(orders: DataFrame) -> None:
+    """order_ts and dt must parse; DATE(order_ts) must equal dt."""
+    ts = F.to_timestamp(F.col("order_ts"))
+    dt = F.to_date(F.col("dt"))
+    n = orders.filter(ts.isNull()).count()
+    if n:
+        _fail("ods_orders.order_ts_parseable", n, "order_ts not parseable as timestamp")
+    n = orders.filter(dt.isNull()).count()
+    if n:
+        _fail("ods_orders.dt_parseable", n, "dt not parseable as date")
+    n = orders.filter(F.to_date(ts) != dt).count()
+    if n:
+        _fail("ods_orders.order_ts_dt_align", n, "DATE(order_ts) != dt")
+
+
 def assert_refund_rules(orders: DataFrame, items: DataFrame) -> None:
     """refund_amount/qty >= 0, refund <= original, header matches item sum, refunded is full."""
     assert_non_negative(orders, "refund_amount", "ods_orders.refund_amount")
@@ -135,6 +163,7 @@ def run_ods_gates(users: DataFrame, orders: DataFrame, items: DataFrame) -> None
         "ods_orders.status",
     )
     assert_non_negative(orders, "pay_amount", "ods_orders.pay_amount")
+    assert_order_ts_dt_parseable_and_aligned(orders)
     assert_fk(orders, users, "user_id", "ods_orders.fk_user")
 
     assert_not_null(
@@ -156,6 +185,7 @@ def run_ods_gates(users: DataFrame, orders: DataFrame, items: DataFrame) -> None
     assert_positive(items, "qty", "ods_items.qty")
     assert_non_negative(items, "unit_price", "ods_items.unit_price")
     assert_non_negative(items, "amount", "ods_items.amount")
+    assert_item_amount_eq_qty_price(items, "ods_items.amount_eq_qty_price")
     assert_fk(items, orders, "order_id", "ods_items.fk_order")
     assert_amount_match(orders, items, "ods_orders.amount_vs_items")
     assert_refund_rules(orders, items)
