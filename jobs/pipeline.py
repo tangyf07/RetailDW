@@ -2,14 +2,15 @@
 """Spark retail DW: ODS CSV -> quality gates -> DWD -> DWS -> ADS (local mode).
 
 Supports optional --dt YYYY-MM-DD for partition-scoped re-runs with dynamic
-partition overwrite (idempotent for the same dt).
+partition overwrite (idempotent for the same dt). Empty ODS for --dt fails
+unless --allow-empty-partition is set (identical empty overwrite for parquet/CSV).
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dtmod
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -25,7 +26,6 @@ from quality import QualityError, run_ods_gates  # noqa: E402
 from reconcile_gmv import reconcile  # noqa: E402
 
 WAREHOUSE = ROOT / "warehouse"
-DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,7 +35,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Partition date YYYY-MM-DD; default=full overwrite of all partitions",
     )
+    p.add_argument(
+        "--allow-empty-partition",
+        action="store_true",
+        help="When --dt has 0 ODS orders, overwrite warehouse/.../dt=<dt> with empty data instead of failing",
+    )
     return p.parse_args(argv)
+
+
+def parse_dt(value: str | None) -> str | None:
+    """Parse --dt with datetime.date.fromisoformat; return canonical YYYY-MM-DD."""
+    if value is None:
+        return None
+    try:
+        return dtmod.date.fromisoformat(value).isoformat()
+    except ValueError as e:
+        raise SystemExit(
+            f"Invalid --dt {value!r}; expected YYYY-MM-DD (date.fromisoformat): {e}"
+        ) from e
 
 
 def spark_session() -> SparkSession:
@@ -127,8 +144,31 @@ def save_table(df: DataFrame, rel: str) -> None:
     _write_csv_rows(df, path / "part-00000.csv")
 
 
+def _clear_dt_partition(path: Path, dt: str) -> Path:
+    """Remove warehouse/.../dt=<dt> so empty overwrite is identical for parquet and CSV."""
+    part_dir = path / f"dt={dt}"
+    if part_dir.exists():
+        shutil.rmtree(part_dir)
+    return part_dir
+
+
+def _write_empty_partition(df: DataFrame, part_dir: Path, use_parquet: bool) -> None:
+    """Persist a zero-row partition with stable schema (parquet or CSV)."""
+    part_dir.mkdir(parents=True, exist_ok=True)
+    empty = df.limit(0)
+    if use_parquet:
+        empty.write.mode("overwrite").parquet(str(part_dir))
+        print(f"[write] parquet-empty {part_dir}")
+    else:
+        _write_csv_rows(empty, part_dir / "part-00000.csv")
+
+
 def save_partitioned(df: DataFrame, rel: str, dt: str | None) -> None:
-    """Write fact/dws tables partitioned by dt with dynamic overwrite semantics."""
+    """Write fact/dws tables partitioned by dt with dynamic overwrite semantics.
+
+    When dt is set, the target warehouse/.../dt=<dt> directory is cleared first so
+    empty ODS partitions overwrite identically on Linux parquet and Windows CSV.
+    """
     path = WAREHOUSE / rel
     if "dt" not in df.columns:
         raise RuntimeError(f"{rel}: expected dt column for partitioned write")
@@ -136,17 +176,33 @@ def save_partitioned(df: DataFrame, rel: str, dt: str | None) -> None:
     # Ensure dt is string yyyy-MM-dd for stable partition paths
     out = df.withColumn("dt", F.date_format(F.col("dt").cast("date"), "yyyy-MM-dd"))
 
-    if os.name != "nt":
+    prefer_parquet = os.name != "nt"
+    if prefer_parquet:
         try:
             if dt is None and path.exists():
                 shutil.rmtree(path)
+            if dt is not None:
+                part_dir = _clear_dt_partition(path, dt)
+                path.mkdir(parents=True, exist_ok=True)
+                part_df = out.filter(F.col("dt") == dt)
+                if part_df.limit(1).count() == 0:
+                    _write_empty_partition(part_df.drop("dt"), part_dir, use_parquet=True)
+                else:
+                    (
+                        part_df.write.mode("overwrite")
+                        .option("partitionOverwriteMode", "dynamic")
+                        .partitionBy("dt")
+                        .parquet(str(path))
+                    )
+                print(f"[write] parquet {path}  (partitionBy=dt, dt={dt})")
+                return
             (
                 out.write.mode("overwrite")
                 .option("partitionOverwriteMode", "dynamic")
                 .partitionBy("dt")
                 .parquet(str(path))
             )
-            print(f"[write] parquet {path}  (partitionBy=dt, dt={dt or 'ALL'})")
+            print(f"[write] parquet {path}  (partitionBy=dt, dt=ALL)")
             return
         except Exception as e:
             print(f"[write] parquet failed ({e.__class__.__name__}); csv fallback")
@@ -164,12 +220,13 @@ def save_partitioned(df: DataFrame, rel: str, dt: str | None) -> None:
             _write_csv_rows(part_df, part_dir / "part-00000.csv")
     else:
         path.mkdir(parents=True, exist_ok=True)
-        part_dir = path / f"dt={dt}"
-        if part_dir.exists():
-            shutil.rmtree(part_dir)
-        part_dir.mkdir(parents=True, exist_ok=True)
+        part_dir = _clear_dt_partition(path, dt)
         part_df = out.filter(F.col("dt") == dt).drop("dt")
-        _write_csv_rows(part_df, part_dir / "part-00000.csv")
+        if part_df.limit(1).count() == 0:
+            _write_empty_partition(part_df, part_dir, use_parquet=False)
+        else:
+            part_dir.mkdir(parents=True, exist_ok=True)
+            _write_csv_rows(part_df, part_dir / "part-00000.csv")
     print(f"[write] csv-parts {path}  (dt={dt or 'ALL'})")
 
 
@@ -194,8 +251,8 @@ def read_partitioned(spark: SparkSession, rel: str) -> DataFrame:
         dt_val = part.name.split("=", 1)[1]
         csv_files = list(part.glob("*.csv"))
         if not csv_files:
+            # empty allow-overwrite may leave header-only or empty dir; skip empty
             continue
-        # read each part file
         for cf in csv_files:
             df = (
                 spark.read.option("header", True)
@@ -203,6 +260,9 @@ def read_partitioned(spark: SparkSession, rel: str) -> DataFrame:
                 .csv(str(cf))
                 .withColumn("dt", F.lit(dt_val))
             )
+            # skip header-only empty files that Spark may read as 0-col weirdness
+            if len(df.columns) <= 1 and df.count() == 0:
+                continue
             frames.append(df)
     if not frames:
         raise FileNotFoundError(f"no partitions under {path}")
@@ -235,10 +295,12 @@ def cast_dwd_order(df: DataFrame) -> DataFrame:
 def cast_dwd_item(df: DataFrame) -> DataFrame:
     return (
         df.withColumn("qty", F.col("qty").cast("int"))
+        .withColumn("gross_qty", F.col("gross_qty").cast("int"))
         .withColumn("unit_price", F.col("unit_price").cast("double"))
         .withColumn("amount", F.col("amount").cast("double"))
         .withColumn("refund_qty", F.col("refund_qty").cast("int"))
         .withColumn("refund_amount", F.col("refund_amount").cast("double"))
+        .withColumn("net_qty", F.col("net_qty").cast("int"))
         .withColumn("net_amount", F.col("net_amount").cast("double"))
         .withColumn("is_paid", F.col("is_paid").cast("int"))
         .withColumn("dt", F.to_date(F.col("dt")))
@@ -248,6 +310,7 @@ def cast_dwd_item(df: DataFrame) -> DataFrame:
 def cast_dws_user(df: DataFrame) -> DataFrame:
     return (
         df.withColumn("order_cnt", F.col("order_cnt").cast("long"))
+        .withColumn("paid_order_cnt", F.col("paid_order_cnt").cast("long"))
         .withColumn("gmv", F.col("gmv").cast("double"))
         .withColumn("is_paid_buyer", F.col("is_paid_buyer").cast("int"))
         .withColumn("dt", F.to_date(F.col("dt")))
@@ -258,6 +321,9 @@ def cast_dws_cat(df: DataFrame) -> DataFrame:
     return (
         df.withColumn("gmv", F.col("gmv").cast("double"))
         .withColumn("qty", F.col("qty").cast("long"))
+        .withColumn("gross_qty", F.col("gross_qty").cast("long"))
+        .withColumn("refund_qty", F.col("refund_qty").cast("long"))
+        .withColumn("net_qty", F.col("net_qty").cast("long"))
         .withColumn("dt", F.to_date(F.col("dt")))
     )
 
@@ -283,9 +349,10 @@ def rebuild_ads_from_warehouse(spark: SparkSession) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    dt = args.dt
-    if dt is not None and not DT_RE.match(dt):
-        print(f"Invalid --dt {dt!r}; expected YYYY-MM-DD", file=sys.stderr)
+    try:
+        dt = parse_dt(args.dt)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
         return 1
 
     spark = spark_session()
@@ -295,7 +362,16 @@ def main(argv: list[str] | None = None) -> int:
         if dt:
             orders = orders.filter(F.col("dt") == dt)
             items = items.join(orders.select("order_id"), on="order_id", how="inner")
-            print(f"[ods] filtered to dt={dt}")
+            n_orders = orders.count()
+            print(f"[ods] filtered to dt={dt} orders={n_orders}")
+            if n_orders == 0 and not args.allow_empty_partition:
+                print(
+                    f"Empty ODS for dt={dt}: 0 orders. "
+                    f"Default FAIL; pass --allow-empty-partition to overwrite "
+                    f"warehouse/.../dt={dt} with empty data.",
+                    file=sys.stderr,
+                )
+                return 2
 
         users.createOrReplaceTempView("ods_users")
         orders.createOrReplaceTempView("ods_orders")
@@ -316,14 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         dws_user = spark.table("dws_user_order_1d")
         dws_cat = spark.table("dws_category_gmv_1d")
 
-        # Persist dims / facts. Partitioned facts use dynamic overwrite by dt.
-        if dt is None:
-            save_table(dwd_user, "dwd/dim_user")
-        else:
-            # Keep existing dim on dt re-run; refresh only if missing
-            dim_path = WAREHOUSE / "dwd" / "dim_user"
-            if not dim_path.exists():
-                save_table(dwd_user, "dwd/dim_user")
+        # dim_user: full refresh every run (no SCD2)
+        save_table(dwd_user, "dwd/dim_user")
 
         save_partitioned(dwd_order, "dwd/fact_order", dt)
         save_partitioned(dwd_item, "dwd/fact_order_item", dt)

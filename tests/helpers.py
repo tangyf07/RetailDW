@@ -90,6 +90,7 @@ def partition_fingerprint(part_dir: Path) -> str:
     Windows CSV fallback writes part-00000.csv; Linux writes *.parquet with
     Spark-generated names. Fingerprint ignores ephemeral filenames for parquet
     by hashing file bytes (sorted), and uses UTF-8 text for csv.
+    Empty partitions (header-only csv or empty parquet/no data files) hash as empty.
     """
     if not part_dir.is_dir():
         raise AssertionError(f"missing partition directory: {part_dir}")
@@ -100,14 +101,13 @@ def partition_fingerprint(part_dir: Path) -> str:
             p.read_text(encoding="utf-8") for p in csv_files
         )
 
-    pq_files = [p for p in part_dir.glob("*.parquet") if p.is_file()]
-    if not pq_files:
-        listing = sorted(p.name for p in part_dir.iterdir())
-        raise AssertionError(
-            f"no csv/parquet artifacts under {part_dir}; contents={listing}"
+    pq_files = sorted(p for p in part_dir.rglob("*.parquet") if p.is_file())
+    if pq_files:
+        digests = sorted(
+            hashlib.sha256(p.read_bytes()).hexdigest() for p in pq_files
         )
+        return "parquet\n" + "\n".join(digests)
 
-    digests = sorted(
-        hashlib.sha256(p.read_bytes()).hexdigest() for p in pq_files
-    )
-    return "parquet\n" + "\n".join(digests)
+    # Empty allow-overwrite may leave dir with only _SUCCESS / crc — treat as empty
+    names = sorted(p.name for p in part_dir.iterdir() if p.is_file())
+    return "empty\n" + "\n".join(names)

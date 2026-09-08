@@ -45,3 +45,18 @@ def good_ods() -> Path:
 @pytest.fixture
 def bad_ods() -> Path:
     return ROOT / "tests" / "fixtures" / "bad_quality"
+
+
+@pytest.fixture
+def bad_fk_ods() -> Path:
+    return ROOT / "tests" / "fixtures" / "bad_fk"
+
+
+@pytest.fixture
+def bad_amount_ods() -> Path:
+    return ROOT / "tests" / "fixtures" / "bad_amount"
+
+
+@pytest.fixture
+def window_ods() -> Path:
+    return ROOT / "tests" / "fixtures" / "window"

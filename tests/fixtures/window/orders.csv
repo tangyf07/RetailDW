@@ -1,0 +1,6 @@
+order_id,user_id,order_ts,status,pay_amount,refund_amount,pay_channel,dt
+O1,U1,2026-07-01 10:00:00,paid,10.00,0.00,alipay,2026-07-01
+O2,U1,2026-07-01 18:00:00,paid,20.00,0.00,alipay,2026-07-01
+O3,U1,2026-07-02 10:00:00,paid,30.00,0.00,alipay,2026-07-02
+O4,U2,2026-07-01 11:00:00,paid,40.00,0.00,wechat,2026-07-01
+O5,U2,2026-07-09 11:00:00,paid,50.00,0.00,wechat,2026-07-09

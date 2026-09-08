@@ -1,0 +1,2 @@
+order_item_id,order_id,sku_id,sku_name,category,qty,unit_price,amount,refund_qty,refund_amount
+I1,O1,SKU1,ItemA,food,2,50.00,999.00,0,0.00
