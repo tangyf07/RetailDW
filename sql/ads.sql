@@ -1,6 +1,7 @@
--- ADS: 7-day repurchase rate + supporting GMV.
--- Definition: among users with a paid order on day D, share who place
--- another paid order on any day in (D, D+7]. Same-day multi-order is NOT repurchase.
+-- ADS: 7-day repurchase rate + supporting GMV (net of refunds).
+-- Definition: among users with a paid order on day D (is_paid=1; refunded is NOT is_paid),
+-- share who place another paid order on any day in (D, D+7]. Same-day multi-order is NOT repurchase.
+-- Refunds only reduce GMV via net amounts; a refund-only day does not create repurchase buyers.
 -- window_complete=0 means D+7 is beyond the sample max date — do not trend those days.
 CREATE OR REPLACE TEMP VIEW ads_repurchase_7d AS
 WITH params AS (

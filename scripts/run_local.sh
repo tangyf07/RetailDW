@@ -15,4 +15,15 @@ PYTHON="${PYTHON:-python3}"
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-python jobs/pipeline.py
+
+# Optional DT=YYYY-MM-DD or first CLI arg --dt / bare date
+DT_ARG=()
+if [[ -n "${DT:-}" ]]; then
+  DT_ARG=(--dt "$DT")
+elif [[ "${1:-}" == "--dt" && -n "${2:-}" ]]; then
+  DT_ARG=(--dt "$2")
+elif [[ "${1:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  DT_ARG=(--dt "$1")
+fi
+
+python jobs/pipeline.py "${DT_ARG[@]}"

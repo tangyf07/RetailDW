@@ -42,10 +42,20 @@ pip install -r requirements.txt
 python jobs/pipeline.py
 ```
 
+可选按日重跑（分区覆盖，同一 `dt` 跑两次结果一致）：
+
+```bash
+DT=2026-07-13 bash scripts/run_local.sh
+# Windows: $env:DT='2026-07-13'; .\scripts\run_local.ps1
+```
+
 成功时看：
 
-- 控制台：`[quality] ODS gates passed`，然后 `ADS kpi overview`
+- 控制台：`[quality] ODS gates passed`，然后 `ADS kpi overview`，以及 `[reconcile] PASS`
 - 文件：`warehouse/ads/ads_kpi_overview.csv`、`warehouse/ads/ads_repurchase_7d.csv`
+- 对账：`warehouse/ads/gmv_reconcile_report.csv`（DWD 订单净 GMV ≡ DWS 用户日 GMV 合计 ≡ ADS 日/总 GMV，容差 0.01；FAIL 时 pipeline exit 2）
+
+`warehouse/dwd|dws/.../dt=YYYY-MM-DD/` 为按日分区；`--dt` 时只覆盖该分区（`partitionOverwriteMode=dynamic`），ADS 会从仓库全部分区重算以保持总览一致。
 
 ## 数据从哪来、多大规模
 
@@ -90,7 +100,7 @@ SQL 在 `sql/dwd.sql`、`sql/dws.sql`、`sql/ads.sql`，`jobs/pipeline.py` 按�
 3. 枚举：`gender`、`channel`、`status`
 4. 范围：`pay_amount/unit_price/amount >= 0`，`qty > 0`
 5. 外键：订单用户必须在用户表；明细订单必须在订单表
-6. 金额勾稽：已支付订单 `pay_amount` 必须等于明细 `amount` 之和（误差 0.01）
+6. 金额勾稽：已支付/已退款订单 `pay_amount` 必须等于明细 `amount` 之和（误差 0.01）；`refund_amount` 与明细退款合计一致，且 `refunded` 须全额退
 
 演示失败：把 `data/ods/orders.csv` 某行 `pay_amount` 改成负数再跑，应看到 `QUALITY FAIL` 且不写 ADS。
 
@@ -106,10 +116,11 @@ repurchase(D)  = buyers(D) 中，在 D+1～D+7 任意一天再次有已支付订
 rate(D)        = repurchase(D) / buyers(D)
 ```
 
-- **已支付**：`status ∈ {paid, shipped, completed}`；`unpaid/cancelled` 不进 GMV、不进复购。
+- **已支付**：`status ∈ {paid, shipped, completed}`；`unpaid/cancelled/refunded` 的 `is_paid=0`，不进复购分母/分子。
+- **冲销/退货**：订单可带 `refund_amount`；明细可带 `refund_qty`/`refund_amount`（均 ≥0）。`pay_amount` 保留原支付额；DWD 增加 `net_gmv = pay_amount - refund_amount`（明细 `net_amount = amount - refund_amount`）。全日/总 GMV 用净额。`status=refunded` 为全额退（`refund_amount == pay_amount`），只减 GMV，不产生复购事件。
 - **同一天多单不算复购**（间隔必须跨日）。这是常见零售口径，避免「拆单」抬高复购。
 - **不完整窗口**：样本最大日为 `max_dt`，若 `D+7 > max_dt` 则 `window_complete=0`。总览 KPI 只用完整窗口做加权：`sum(repurchase_users) / sum(buyers)`。
-- **GMV**：已支付订单 `pay_amount` 之和（与明细勾稽过）。
+- **GMV**：已支付订单净额 `net_gmv` 之和（与明细净额勾稽；对账见运行产物）。
 
 总览字段见 `warehouse/ads/ads_kpi_overview.csv`：`paid_orders`、`paid_users`、`gmv_total`、`repurchase_rate_7d_weighted`。
 
@@ -125,13 +136,14 @@ rate(D)        = repurchase(D) / buyers(D)
 
 ```
 data/ods/                 离线样本 CSV
-jobs/pipeline.py          入口
+jobs/pipeline.py          入口（支持 --dt）
 jobs/quality.py           质量门
+jobs/reconcile_gmv.py     DWD/DWS/ADS GMV 对账
 sql/                      DWD / DWS / ADS Spark SQL
-scripts/run_local.sh      Linux/macOS
+scripts/run_local.sh      Linux/macOS（透传 DT/--dt）
 scripts/run_local.ps1     Windows
 scripts/gen_sample_data.py
-warehouse/                运行产出（git 忽略）
+warehouse/                运行产出（git 忽略；含 dt 分区与对账报告）
 ```
 
 ## 面试 2 分钟讲法
