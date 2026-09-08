@@ -22,7 +22,7 @@
 ## 怎么跑
 
 ```bash
-git clone https://github.com/tangyf07/spark-retail-dw.git
+git clone https://github.com/tangyf07/RetailDW.git
 cd spark-retail-dw
 
 # Linux / macOS
