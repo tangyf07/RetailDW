@@ -19,6 +19,13 @@
 - 内存 4GB 足够（local 小样本）
 - 首次 `pip install pyspark` 会下载 Spark（约 400MB），之后跑 pipeline 约 1–2 分钟
 
+
+## 证据图
+
+本机 `run_local`：`ads_kpi_overview` + `[reconcile] PASS`（路径已脱敏）。
+
+![reconcile PASS](docs/evidence/reconcile-pass.png)
+
 ## 怎么跑
 
 ```bash
