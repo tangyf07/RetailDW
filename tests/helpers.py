@@ -1,6 +1,7 @@
 """Helpers to load fixture ODS and build DWD/DWS/ADS temp views."""
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -76,3 +77,37 @@ def prepare_temp_repo(tmp: Path, ods_src: Path) -> Path:
     for name in ("dwd.sql", "dws.sql", "ads.sql"):
         shutil.copy(ROOT / "sql" / name, tmp / "sql" / name)
     return tmp
+
+
+def partition_dir(repo: Path, rel: str, dt: str) -> Path:
+    """warehouse/<rel>/dt=<dt> partition folder."""
+    return repo / "warehouse" / Path(rel) / f"dt={dt}"
+
+
+def partition_fingerprint(part_dir: Path) -> str:
+    """Stable fingerprint of a dt partition for csv or parquet layouts.
+
+    Windows CSV fallback writes part-00000.csv; Linux writes *.parquet with
+    Spark-generated names. Fingerprint ignores ephemeral filenames for parquet
+    by hashing file bytes (sorted), and uses UTF-8 text for csv.
+    """
+    if not part_dir.is_dir():
+        raise AssertionError(f"missing partition directory: {part_dir}")
+
+    csv_files = sorted(p for p in part_dir.glob("*.csv") if p.is_file())
+    if csv_files:
+        return "csv\n" + "\n---\n".join(
+            p.read_text(encoding="utf-8") for p in csv_files
+        )
+
+    pq_files = [p for p in part_dir.glob("*.parquet") if p.is_file()]
+    if not pq_files:
+        listing = sorted(p.name for p in part_dir.iterdir())
+        raise AssertionError(
+            f"no csv/parquet artifacts under {part_dir}; contents={listing}"
+        )
+
+    digests = sorted(
+        hashlib.sha256(p.read_bytes()).hexdigest() for p in pq_files
+    )
+    return "parquet\n" + "\n".join(digests)

@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "jobs"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from helpers import build_layers, load_ods_dir, prepare_temp_repo  # noqa: E402
+from helpers import (  # noqa: E402
+    build_layers,
+    load_ods_dir,
+    partition_dir,
+    partition_fingerprint,
+    prepare_temp_repo,
+)
 from quality import QualityError, run_ods_gates  # noqa: E402
 from reconcile_gmv import reconcile  # noqa: E402
 
@@ -76,23 +82,16 @@ def test_same_dt_rerun_is_idempotent(spark, good_ods, tmp_path, monkeypatch):
 
     assert pipeline.main([]) == 0
 
-    part = (
-        tmp_repo
-        / "warehouse"
-        / "dwd"
-        / "fact_order"
-        / "dt=2026-07-01"
-        / "part-00000.csv"
-    )
-    assert part.exists()
-    first = part.read_text(encoding="utf-8")
+    # Windows CSV fallback: part-00000.csv; Linux: *.parquet under dt=...
+    part = partition_dir(tmp_repo, "dwd/fact_order", "2026-07-01")
+    first = partition_fingerprint(part)
 
     assert pipeline.main(["--dt", "2026-07-01"]) == 0
-    second = part.read_text(encoding="utf-8")
+    second = partition_fingerprint(part)
     assert first == second
 
     assert pipeline.main(["--dt", "2026-07-01"]) == 0
-    third = part.read_text(encoding="utf-8")
+    third = partition_fingerprint(part)
     assert second == third
 
     kpi = tmp_repo / "warehouse" / "ads" / "ads_kpi_overview.csv"
