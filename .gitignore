@@ -12,3 +12,6 @@ derby.log
 .python-version
 
 tools/hadoop/
+
+.pytest_tmp/
+.pytest_cache/

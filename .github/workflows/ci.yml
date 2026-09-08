@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test-and-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Pytest
+        env:
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: pytest
+
+      - name: Pipeline on sample ODS + reconcile PASS
+        env:
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: |
+          python jobs/pipeline.py
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+          report = Path("warehouse/ads/gmv_reconcile_report.csv")
+          assert report.exists(), f"missing {report}"
+          rows = list(csv.DictReader(report.open(encoding="utf-8")))
+          assert rows, "empty reconcile report"
+          bad = [r for r in rows if r.get("status") != "PASS"]
+          assert not bad, f"reconcile FAIL rows: {bad}"
+          print(f"[ci] reconcile PASS ({len(rows)} checks)")
+          PY

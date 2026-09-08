@@ -1,0 +1,6 @@
+order_item_id,order_id,sku_id,sku_name,category,qty,unit_price,amount,refund_qty,refund_amount
+I1,O1,SKU1,ItemA,food,1,100.00,100.00,0,0.00
+I2,O2,SKU2,ItemB,home,1,50.00,50.00,0,0.00
+I3,O3,SKU3,ItemC,food,1,80.00,80.00,1,80.00
+I4,O4,SKU4,ItemD,food,2,100.00,200.00,0,20.00
+I5,O5,SKU5,ItemE,food,1,30.00,30.00,0,0.00
